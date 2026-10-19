@@ -1,0 +1,11 @@
+@'
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+desktop.ini
+Thumbs.db
+'@ | Out-File -FilePath .gitignore -Append -Encoding utf8
