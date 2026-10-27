@@ -15,13 +15,16 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 
+import seaborn as sns
+
 from sklearn.metrics import (
     accuracy_score,
     precision_score,
     recall_score,
     f1_score,
     roc_auc_score,
-    classification_report
+    classification_report,
+    confusion_matrix
 )
 
 #Access data from Kaggle
@@ -179,6 +182,7 @@ models = {
 #Train and evaluate models 
 
 results = []
+predictions = {}
 
 for name, model in models.items():
 
@@ -225,6 +229,7 @@ for name, model in models.items():
     ))
 
     print("ROC-AUC:", roc_auc)
+    predictions[name] = y_pred
 
 #Compare models
 
@@ -235,3 +240,84 @@ print(results_df.sort_values(
     by="F1",
     ascending=False
 ))
+
+#Visualizations
+
+#Churn distribution
+
+churn_counts = df["Churn"].value_counts().sort_index()
+
+plt.figure(figsize=(7, 5))
+plt.bar(
+    ["Non-churn", "Churn"],
+    churn_counts.values
+)
+
+plt.title("Customer Churn Distribution")
+plt.xlabel("Customer Class")
+plt.ylabel("Number of Customers")
+
+for i, count in enumerate(churn_counts.values):
+    plt.text(i, count + 100, f"{count:,}", ha="center")
+
+plt.tight_layout()
+plt.show()
+
+#Comparison of models
+
+metrics = ["Precision", "Recall", "F1", "ROC-AUC"]
+
+results_long = results_df.melt(
+    id_vars="Model",
+    value_vars=metrics,
+    var_name="Metric",
+    value_name="Score"
+)
+
+plt.figure(figsize=(11, 6))
+
+sns.barplot(
+    data=results_long,
+    x="Model",
+    y="Score",
+    hue="Metric"
+)
+
+plt.title("Classification Model Performance Comparison")
+plt.ylabel("Score")
+plt.xlabel("Model")
+plt.ylim(0, 1)
+plt.xticks(rotation=15)
+plt.tight_layout()
+plt.show()
+
+#Confusion matrix
+
+fig, axes = plt.subplots(2, 2, figsize=(11, 9))
+
+for ax, (name, y_pred) in zip(
+    axes.flatten(), predictions.items()
+):
+    cm = confusion_matrix(
+        y_test,
+        y_pred,
+        labels=[0, 1]
+    )
+
+    sns.heatmap(
+        cm,
+        annot=True,
+        fmt="d",
+        cmap="Blues",
+        xticklabels=["Non-churn", "Churn"],
+        yticklabels=["Non-churn", "Churn"],
+        ax=ax
+    )
+
+    ax.set_title(name)
+    ax.set_xlabel("Predicted Class")
+    ax.set_ylabel("Actual Class")
+
+plt.suptitle("Confusion Matrices by Model")
+plt.tight_layout()
+plt.show()

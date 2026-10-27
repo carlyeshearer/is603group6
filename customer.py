@@ -8,6 +8,9 @@ import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
+from sklearn.decomposition import PCA
+
+import seaborn as sns
 
 #Access data from Kaggle
 
@@ -106,3 +109,63 @@ strategy_by_cluster = pd.crosstab(
 
 print("\nRetention Strategy Distribution by Cluster:")
 print(strategy_by_cluster.round(2))
+
+#Visualizations
+
+#Scatterplot
+
+pca = PCA(n_components=2)
+X_pca = pca.fit_transform(X_scaled)
+
+pca_df = pd.DataFrame({
+    "PC1": X_pca[:, 0],
+    "PC2": X_pca[:, 1],
+    "Cluster": df["Cluster"].astype(str)
+})
+
+plt.figure(figsize=(9, 7))
+
+sns.scatterplot(
+    data=pca_df,
+    x="PC1",
+    y="PC2",
+    hue="Cluster",
+    palette="tab10",
+    alpha=0.6,
+    s=35
+)
+
+explained = pca.explained_variance_ratio_.sum() * 100
+
+plt.title(
+    f"Customer Segments Using PCA (K=8)\n"
+    f"Two components explain {explained:.1f}% of variance"
+)
+plt.xlabel("Principal Component 1")
+plt.ylabel("Principal Component 2")
+plt.legend(title="Cluster", bbox_to_anchor=(1.02, 1), loc="upper left")
+plt.tight_layout()
+plt.show()
+
+#Retention strategy distribution
+
+ax = strategy_by_cluster.plot(
+    kind="bar",
+    stacked=True,
+    figsize=(10, 6),
+    width=0.8
+)
+
+ax.set_title("Retention Strategy Distribution by Customer Cluster")
+ax.set_xlabel("Customer Cluster")
+ax.set_ylabel("Percentage of Customers")
+ax.set_ylim(0, 100)
+ax.legend(
+    title="Retention Strategy",
+    bbox_to_anchor=(1.02, 1),
+    loc="upper left"
+)
+
+plt.xticks(rotation=0)
+plt.tight_layout()
+plt.show()
