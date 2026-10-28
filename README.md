@@ -50,5 +50,5 @@ python churn.py
 python customer.py
 
 #Product script (To be implemented)
-#python product.py
+python product.py
 ```

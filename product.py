@@ -76,12 +76,12 @@ season_rules = season_rules.sort_values(
 print("\nRules associated with seasons:")
 print(
     season_rules[
-        ["season", "category",
+        ["antecedents", "consequents",
          "support", "confidence", "lift"]
     ].head(20).to_string(index=False)
 )
 
-#Visaulization
+#Visaulizations
 
 category_pct = pd.crosstab(
     analysis_df["Season"],
