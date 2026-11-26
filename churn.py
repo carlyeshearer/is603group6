@@ -1,323 +1,161 @@
 #Churn prediction: classification.
 #Which customers will churn?
 
+import warnings
+warnings.filterwarnings("ignore")
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.stats import mannwhitneyu
 
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score, permutation_test_score
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
-from sklearn.impute import SimpleImputer
-
 from sklearn.linear_model import LogisticRegression
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
 
-import seaborn as sns
+from imblearn.pipeline import Pipeline
+from imblearn.over_sampling import SMOTE
+from imblearn.under_sampling import RandomUnderSampler
 
-from sklearn.metrics import (
-    accuracy_score,
-    precision_score,
-    recall_score,
-    f1_score,
-    roc_auc_score,
-    classification_report,
-    confusion_matrix
-)
-
-#Access data from Kaggle
+#Load data and convert dates to year/month
 
 df = pd.read_csv("sales_and_customer_insights.csv")
-#print("Dataset shape:", df.shape)
-#print(df.head())
-#print(df.info())
 
-#print("Unique customers:",
-      #df["Customer_ID"].nunique())
+for col in ["Launch_Date", "Peak_Sales_Date"]:
+    dates = pd.to_datetime(df[col], errors="coerce")
+    df[col + "_Year"] = dates.dt.year
+    df[col + "_Month"] = dates.dt.month
+    df = df.drop(columns=col)
 
-#print("Total rows:",
-      #len(df))
-
-#print(df["Purchase_Frequency"].describe())
-#print(df["Time_Between_Purchases"].describe())
-
-#Convert dates and drop original columns
-
-date_columns = [
-    "Launch_Date",
-    "Peak_Sales_Date"
-]
-
-for col in date_columns:
-    df[col] = pd.to_datetime(df[col], errors="coerce")
-
-df["Launch_Year"] = df["Launch_Date"].dt.year
-df["Launch_Month"] = df["Launch_Date"].dt.month
-
-df["Peak_Sales_Year"] = df["Peak_Sales_Date"].dt.year
-df["Peak_Sales_Month"] = df["Peak_Sales_Date"].dt.month
-
-df = df.drop(columns=date_columns)
-
-#Create churn label
+#1. Create churn label: infrequent buyers (bottom 25%) with long gaps (top 25%)
 
 df["Churn"] = (
-    (df["Purchase_Frequency"] <= 5) & #less frequent purchases (25th percentile)
-    (df["Time_Between_Purchases"] >= 68) #longer time between purchases (75th percentile)
+    (df["Purchase_Frequency"] <= 5) &
+    (df["Time_Between_Purchases"] >= 68)
 ).astype(int)
 
-print("\nChurn distribution:")
-print(df["Churn"].value_counts())
+print("Churn rate:", round(df["Churn"].mean(), 3))
 
-print("\nChurn percentages:")
-print(df["Churn"].value_counts(normalize=True))
+#2. Validate churn definition: churners should have higher Churn_Probability
 
-#Define predictors and target, excluding churn_probability
+churners = df.loc[df["Churn"] == 1, "Churn_Probability"]
+others = df.loc[df["Churn"] == 0, "Churn_Probability"]
+p_value = mannwhitneyu(churners, others).pvalue
 
-X = df.drop(columns=["Churn", "Churn_Probability"]) #predictors
-y = df["Churn"] #target
+print("\n--- Churn definition check ---")
+print(f"Churn_Probability: churners {churners.mean():.3f} vs others {others.mean():.3f} (p = {p_value:.3f})")
+print("-> The label does NOT match Churn_Probability; treat it as a behavioural proxy.")
 
-#Remove IDs and predictor columns
+#3. Prevent leakage: remove columns used to build the label, IDs and outcome-like columns
 
-X = df.drop(columns=[
-    "Churn",
-    "Churn_Probability",
-    "Purchase_Frequency",
-    "Time_Between_Purchases",
-    "Customer_ID",
-    "Product_ID",
-    "Transaction_ID",
-    "Retention_Strategy"
-])
+leak_columns = ["Purchase_Frequency", "Time_Between_Purchases", "Churn_Probability", "Retention_Strategy"]
+id_columns = ["Customer_ID", "Product_ID", "Transaction_ID"]
 
-#Identify numerical/categorical variables
+X = df.drop(columns=["Churn"] + leak_columns + id_columns)
+y = df["Churn"]
 
-numerical_features = X.select_dtypes(
-    include=["int64", "float64"]
-).columns.tolist()
-
-categorical_features = X.select_dtypes(
-    include=["object"]
-).columns.tolist()
-
-print("\nNumerical features:")
-print(numerical_features)
-
-print("\nCategorical features:")
-print(categorical_features)
-
-#Preprocessing
-
-numeric_pipeline = Pipeline([
-    ("imputer", SimpleImputer(strategy="median")),
-    ("scaler", StandardScaler())
-])
-
-categorical_pipeline = Pipeline([
-    ("imputer", SimpleImputer(strategy="most_frequent")),
-    ("encoder", OneHotEncoder(handle_unknown="ignore"))
-])
+numerical = X.select_dtypes(include="number").columns
+categorical = X.select_dtypes(exclude="number").columns
 
 preprocessor = ColumnTransformer([
-    ("numeric", numeric_pipeline, numerical_features),
-    ("categorical", categorical_pipeline, categorical_features)
+    ("num", StandardScaler(), numerical),
+    ("cat", OneHotEncoder(handle_unknown="ignore"), categorical)
 ])
 
-#Train/test split
-
 X_train, X_test, y_train, y_test = train_test_split(
-    X,
-    y,
-    test_size=0.20,
-    random_state=42,
-    stratify=y
+    X, y, test_size=0.20, random_state=42, stratify=y
 )
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
-print("\nTraining set:", X_train.shape)
-print("Testing set:", X_test.shape)
+#Leakage demo: a model that is allowed to see the label-defining columns
 
-#Majority class baseline
+leaky_X = df[["Purchase_Frequency", "Time_Between_Purchases"]]
+leaky_auc = cross_val_score(DecisionTreeClassifier(max_depth=3), leaky_X, y, cv=cv, scoring="roc_auc").mean()
+print(f"\n--- Leakage check ---\nWith label columns included: ROC-AUC = {leaky_auc:.2f} (cheating, so they are removed)")
 
-majority_class = y_train.mode()[0]
-
-baseline_predictions = np.full(
-    len(y_test),
-    majority_class
-)
-
-print("\n--- Majority Class Baseline ---")
-print("Accuracy:", accuracy_score(y_test, baseline_predictions))
-print("Precision:", precision_score(y_test, baseline_predictions, zero_division=0))
-print("Recall:", recall_score(y_test, baseline_predictions, zero_division=0))
-print("F1:", f1_score(y_test, baseline_predictions, zero_division=0))
-
-#Define classification models
+#4. Class imbalance: compare models x resampling techniques with 5-fold CV
 
 models = {
-    "Logistic Regression": LogisticRegression(
-        max_iter=1000,
-        class_weight="balanced"
-    ),
-
-    "Decision Tree": DecisionTreeClassifier(
-        max_depth=5,
-        class_weight="balanced",
-        random_state=42
-    ),
-
-    "Random Forest": RandomForestClassifier(
-        n_estimators=200,
-        class_weight="balanced",
-        random_state=42
-    ),
-
-    "Gradient Boosting": GradientBoostingClassifier(
-        n_estimators=100,
-        random_state=42
-    )
+    "Logistic Regression": LogisticRegression(max_iter=1000),
+    "Decision Tree": DecisionTreeClassifier(max_depth=5, random_state=42),
+    "Random Forest": RandomForestClassifier(n_estimators=200, min_samples_leaf=5, random_state=42),
+    "Gradient Boosting": GradientBoostingClassifier(random_state=42)
 }
 
-#Train and evaluate models 
+samplers = {
+    "None": None,
+    "SMOTE": SMOTE(random_state=42),
+    "Undersampling": RandomUnderSampler(random_state=42)
+}
+
+
+def make_pipeline(model, sampler):
+    steps = [("prep", preprocessor)]
+    if sampler is not None:
+        steps.append(("sampler", sampler))
+    steps.append(("model", model))
+    return Pipeline(steps)
+
 
 results = []
-predictions = {}
+for model_name, model in models.items():
+    for sampler_name, sampler in samplers.items():
+        auc = cross_val_score(make_pipeline(model, sampler), X_train, y_train,
+                              cv=cv, scoring="roc_auc", n_jobs=-1).mean()
+        results.append({"Model": model_name, "Imbalance": sampler_name, "ROC-AUC": auc})
 
-for name, model in models.items():
+results_df = pd.DataFrame(results).sort_values("ROC-AUC", ascending=False)
+print("\n--- Cross-validated ROC-AUC (0.5 = coin flip) ---")
+print(results_df.round(3).to_string(index=False))
 
-    pipeline = Pipeline([
-        ("preprocessing", preprocessor),
-        ("model", model)
-    ])
+#5. Is the best model better than chance? (permutation test)
 
-    pipeline.fit(X_train, y_train)
-    y_pred = pipeline.predict(X_test)
-    y_prob = pipeline.predict_proba(X_test)[:, 1]
+best = results_df.iloc[0]
+best_pipeline = make_pipeline(models[best["Model"]], samplers[best["Imbalance"]])
 
-    accuracy = accuracy_score(y_test, y_pred)
-    precision = precision_score(
-        y_test, y_pred, zero_division=0
-    )
-    recall = recall_score(
-        y_test, y_pred, zero_division=0
-    )
-    f1 = f1_score(
-        y_test, y_pred, zero_division=0
-    )
-    roc_auc = roc_auc_score(
-        y_test, y_prob
-    )
+score, _, perm_p = permutation_test_score(
+    best_pipeline, X_train, y_train, cv=cv, scoring="roc_auc",
+    n_permutations=50, random_state=42, n_jobs=-1
+)
+print(f"\n--- Permutation test: {best['Model']} + {best['Imbalance']} ---")
+print(f"ROC-AUC = {score:.3f}, p = {perm_p:.2f}")
+print("-> Better than chance" if perm_p < 0.05 else "-> NOT better than chance: predictors carry no churn signal")
 
-    results.append({
-        "Model": name,
-        "Accuracy": accuracy,
-        "Precision": precision,
-        "Recall": recall,
-        "F1": f1,
-        "ROC-AUC": roc_auc
-    })
+#6. Final check on the hold-out test set
 
-    print("\n-----------------------------")
-    print(name)
-    print("-----------------------------")
+best_pipeline.fit(X_train, y_train)
+y_pred = best_pipeline.predict(X_test)
+y_prob = best_pipeline.predict_proba(X_test)[:, 1]
 
-    print(classification_report(
-        y_test,
-        y_pred,
-        zero_division=0
-    ))
-
-    print("ROC-AUC:", roc_auc)
-    predictions[name] = y_pred
-
-#Compare models
-
-results_df = pd.DataFrame(results)
-
-print("\n===== MODEL COMPARISON =====")
-print(results_df.sort_values(
-    by="F1",
-    ascending=False
-))
+print("\n--- Hold-out test results ---")
+print(classification_report(y_test, y_pred, zero_division=0))
+print("Test ROC-AUC:", round(roc_auc_score(y_test, y_prob), 3))
 
 #Visualizations
 
-#Churn distribution
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
-churn_counts = df["Churn"].value_counts().sort_index()
+df["Churn"].value_counts().sort_index().plot(kind="bar", ax=axes[0])
+axes[0].set_xticklabels(["Non-churn", "Churn"], rotation=0)
+axes[0].set_title("Churn Distribution")
 
-plt.figure(figsize=(7, 5))
-plt.bar(
-    ["Non-churn", "Churn"],
-    churn_counts.values
-)
+sns.barplot(data=results_df, x="Model", y="ROC-AUC", hue="Imbalance", ax=axes[1])
+axes[1].axhline(0.5, color="black", linestyle="--")
+axes[1].set_ylim(0, 1)
+axes[1].set_title("Model Comparison (dashed line = coin flip)")
+axes[1].tick_params(axis="x", rotation=15)
 
-plt.title("Customer Churn Distribution")
-plt.xlabel("Customer Class")
-plt.ylabel("Number of Customers")
-
-for i, count in enumerate(churn_counts.values):
-    plt.text(i, count + 100, f"{count:,}", ha="center")
+sns.heatmap(confusion_matrix(y_test, y_pred), annot=True, fmt="d", cmap="Blues",
+            xticklabels=["Non-churn", "Churn"], yticklabels=["Non-churn", "Churn"], ax=axes[2])
+axes[2].set_title(f"Confusion Matrix: {best['Model']} + {best['Imbalance']}")
+axes[2].set_xlabel("Predicted")
+axes[2].set_ylabel("Actual")
 
 plt.tight_layout()
-plt.show()
-
-#Comparison of models
-
-metrics = ["Precision", "Recall", "F1", "ROC-AUC"]
-
-results_long = results_df.melt(
-    id_vars="Model",
-    value_vars=metrics,
-    var_name="Metric",
-    value_name="Score"
-)
-
-plt.figure(figsize=(11, 6))
-
-sns.barplot(
-    data=results_long,
-    x="Model",
-    y="Score",
-    hue="Metric"
-)
-
-plt.title("Classification Model Performance Comparison")
-plt.ylabel("Score")
-plt.xlabel("Model")
-plt.ylim(0, 1)
-plt.xticks(rotation=15)
-plt.tight_layout()
-plt.show()
-
-#Confusion matrix
-
-fig, axes = plt.subplots(2, 2, figsize=(11, 9))
-
-for ax, (name, y_pred) in zip(
-    axes.flatten(), predictions.items()
-):
-    cm = confusion_matrix(
-        y_test,
-        y_pred,
-        labels=[0, 1]
-    )
-
-    sns.heatmap(
-        cm,
-        annot=True,
-        fmt="d",
-        cmap="Blues",
-        xticklabels=["Non-churn", "Churn"],
-        yticklabels=["Non-churn", "Churn"],
-        ax=ax
-    )
-
-    ax.set_title(name)
-    ax.set_xlabel("Predicted Class")
-    ax.set_ylabel("Actual Class")
-
-plt.suptitle("Confusion Matrices by Model")
-plt.tight_layout()
+plt.savefig("Figures/Churn_Results.png", dpi=150)
 plt.show()
